@@ -1,0 +1,74 @@
+// SOMER 2.0 — Configuración por defecto
+// Copia a ~/.somer/config.json y personaliza
+{
+  "version": "2.0",
+  "default_model": "claude-sonnet-4-5-20250929",
+  "fast_model": "claude-haiku-4-5-20251001",
+
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 18789,
+    "ping_interval": 30.0,
+    "ping_timeout": 10.0
+  },
+
+  "providers": {
+    // Descomenta y configura los providers que uses
+    // "anthropic": {
+    //   "enabled": true,
+    //   "auth": { "api_key_env": "ANTHROPIC_API_KEY" }
+    // },
+    // "openai": {
+    //   "enabled": true,
+    //   "auth": { "api_key_env": "OPENAI_API_KEY" }
+    // }
+  },
+
+  "channels": {
+    // "telegram": {
+    //   "enabled": true,
+    //   "plugin": "somer.channels.telegram",
+    //   "config": { "token_env": "TELEGRAM_BOT_TOKEN" }
+    // },
+    // "slack": {
+    //   "enabled": true,
+    //   "plugin": "somer.channels.slack",
+    //   "config": { "token_env": "SLACK_BOT_TOKEN" }
+    // },
+    // "discord": {
+    //   "enabled": true,
+    //   "plugin": "somer.channels.discord",
+    //   "config": { "token_env": "DISCORD_BOT_TOKEN" }
+    // }
+  },
+
+  "memory": {
+    "enabled": true,
+    "backend": "sqlite",
+    "embedding_provider": "openai",
+    "embedding_model": "text-embedding-3-small",
+    "embedding_dim": 1536,
+    "max_results": 20,
+    "temporal_decay_days": 30
+  },
+
+  "sessions": {
+    "idle_timeout_secs": 3600,
+    "max_turns": 200,
+    "persist": true
+  },
+
+  "context_engine": {
+    "compact_threshold_ratio": 0.85,
+    "max_context_tokens": 128000,
+    "max_output_tokens": 8192
+  },
+
+  "security": {
+    "audit_on_start": true,
+    "block_dangerous_skills": true
+  },
+
+  "skills_dirs": ["skills"],
+  "hooks": {}
+}
