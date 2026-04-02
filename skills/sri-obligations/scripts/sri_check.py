@@ -290,8 +290,89 @@ Ejecutado por: SOMER SRI Obligations"""
     return "\n".join(lines)
 
 
+def _notificar_whatsapp_obligaciones(result: dict) -> None:
+    """Envía notificación WhatsApp si el RUC tiene obligaciones y número configurado.
+
+    Consulta el número WhatsApp del RUC en sri_credentials.db. Si no tiene número
+    configurado, solo registra un warning y continúa sin fallar.
+
+    Args:
+        result: Resultado de consultar_obligaciones() con claves success, ruc, obligaciones, etc.
+    """
+    if not result.get("success"):
+        return
+
+    obligaciones = result.get("obligaciones", [])
+    if not obligaciones:
+        return  # Sin obligaciones pendientes, no hay nada que notificar
+
+    ruc = result.get("ruc", "")
+    nombre = result.get("name", "") or ""
+
+    if not ruc:
+        return
+
+    # Resolver número WhatsApp desde la BD de credenciales SRI
+    whatsapp_number: str | None = None
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+        from channels.whatsapp.notifier import WhatsAppNotifier
+        from agents.tools.sri_credentials import get_credentials
+
+        creds = get_credentials(ruc)
+        if creds:
+            whatsapp_number = creds.get("whatsapp_number")
+    except Exception as exc:
+        print(f"[SRI] Advertencia: no se pudo cargar notifier WhatsApp: {exc}", file=sys.stderr)
+        return
+
+    if not whatsapp_number:
+        print(
+            f"[SRI] Advertencia: RUC {ruc} no tiene whatsapp_number configurado — "
+            "notificación WhatsApp omitida",
+            file=sys.stderr,
+        )
+        return
+
+    # Construir resumen de obligaciones para el mensaje
+    total = len(obligaciones)
+    # Incluir las primeras 3 obligaciones más urgentes en el mensaje
+    primeras = obligaciones[:3]
+    resumen_items = "; ".join(primeras)
+    if total > 3:
+        resumen_items += f" (y {total - 3} más)"
+    mensaje = f"{total} obligación(es) pendiente(s): {resumen_items}"
+
+    razonsocial = nombre or ruc
+
+    try:
+        notifier = WhatsAppNotifier()
+        resultado_wa = notifier.notify_sri_obligation(
+            whatsapp_number=whatsapp_number,
+            ruc=ruc,
+            razonsocial=razonsocial,
+            obligation_detail=mensaje,
+        )
+        if resultado_wa.get("success"):
+            print(
+                f"[SRI] Notificación WhatsApp enviada a {whatsapp_number} para RUC {ruc}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[SRI] Advertencia: fallo al enviar WhatsApp a {whatsapp_number}: "
+                f"{resultado_wa.get('error', 'error desconocido')}",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(f"[SRI] Advertencia: error inesperado enviando WhatsApp: {exc}", file=sys.stderr)
+
+
 async def main():
     result = await consultar_obligaciones()
+
+    # Enviar notificación WhatsApp si hay obligaciones pendientes
+    _notificar_whatsapp_obligaciones(result)
 
     # Output JSON si se pide (--json flag o detección legacy)
     if _cli_args.use_json or "--json" in sys.argv:

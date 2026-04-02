@@ -141,6 +141,32 @@ class Alert:
             lines.append(f"📊 {metrics_str}")
         return "\n".join(lines)
 
+    def send_whatsapp_alert(self, phone: str, razonsocial: str = "SOMER") -> dict:
+        """Envía esta alerta por WhatsApp al número indicado.
+
+        Usa WhatsAppNotifier para despachar el mensaje formateado de la alerta
+        a través del template 'dtirols' de la WhatsApp Business Cloud API.
+
+        Args:
+            phone:       Número destino en formato internacional sin + (ej: '593987654321').
+            razonsocial: Nombre del remitente para el header del template.
+
+        Returns:
+            dict con {success, http_code, whatsapp_number} o {success, error}.
+        """
+        try:
+            from channels.whatsapp.notifier import WhatsAppNotifier
+            notifier = WhatsAppNotifier()
+            mensaje = f"[{self.severity.value.upper()}] {self.title}: {self.message}"
+            return notifier.notify_user(
+                whatsapp_number=phone,
+                message=mensaje,
+                razonsocial=razonsocial,
+            )
+        except Exception as exc:
+            logger.error("Error enviando alerta WhatsApp a %s: %s", phone, exc)
+            return {"success": False, "error": str(exc)}
+
 
 # Tipo para función de chequeo de monitor
 MonitorCheckFunc = Callable[[], Awaitable[MonitorCheck]]
@@ -602,6 +628,43 @@ class ProactiveAlertManager:
             name=name or f"Process: {process_name}",
             check_func=_check,
         )
+
+    # ── WhatsApp ────────────────────────────────────────────
+
+    async def send_whatsapp_alert(self, phone: str, message: str, razonsocial: str = "SOMER") -> dict:
+        """Envía un mensaje de alerta directo por WhatsApp.
+
+        Método de conveniencia para despachar notificaciones al canal WhatsApp
+        sin necesidad de crear un objeto Alert completo. Útil cuando el canal
+        configurado en AlertRule es 'whatsapp'.
+
+        Args:
+            phone:       Número destino en formato internacional sin + (ej: '593987654321').
+            message:     Texto del mensaje de alerta.
+            razonsocial: Nombre del remitente para el header del template.
+
+        Returns:
+            dict con {success, http_code, whatsapp_number} o {success, error}.
+        """
+        try:
+            from channels.whatsapp.notifier import WhatsAppNotifier
+            notifier = WhatsAppNotifier()
+            resultado = notifier.notify_user(
+                whatsapp_number=phone,
+                message=message,
+                razonsocial=razonsocial,
+            )
+            if resultado.get("success"):
+                logger.info("Alerta WhatsApp enviada a %s", phone)
+            else:
+                logger.warning(
+                    "Fallo al enviar alerta WhatsApp a %s: %s",
+                    phone, resultado.get("error", "error desconocido"),
+                )
+            return resultado
+        except Exception as exc:
+            logger.error("Error inesperado en send_whatsapp_alert a %s: %s", phone, exc)
+            return {"success": False, "error": str(exc)}
 
     # ── Status ─────────────────────────────────────────────
 

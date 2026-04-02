@@ -27,7 +27,8 @@ import json
 import logging
 import math
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections import OrderedDict
+from typing import Any, Callable, Dict, ItemsView, List, Optional, Tuple
 
 from memory.embeddings import DummyEmbeddings, EmbeddingProvider
 from memory.hybrid import (
@@ -64,6 +65,73 @@ from shared.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class LRUEmbeddingCache:
+    """Cache LRU de embeddings con tamaño máximo para evitar memory leaks.
+
+    Almacena vectores como numpy arrays (float32) en lugar de listas Python.
+    Ahorro de RAM: 14x menos por embedding (4 bytes vs ~56 bytes por float).
+    Límite: maxsize × dimensión × 4 bytes (ej: 2000 × 1536 × 4 = ~12MB máx).
+    """
+
+    def __init__(self, maxsize: int = 2000):
+        self._maxsize = maxsize
+        self._cache: "OrderedDict[str, Any]" = OrderedDict()
+
+    def __setitem__(self, key: str, value: "List[float]") -> None:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
+            if len(self._cache) >= self._maxsize:
+                self._cache.popitem(last=False)
+        try:
+            import numpy as np
+            self._cache[key] = np.asarray(value, dtype=np.float32)
+        except ImportError:
+            self._cache[key] = value
+
+    def __getitem__(self, key: str) -> "Any":
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        return self._cache[key]
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._cache
+
+    def get(self, key: str, default: "Any" = None) -> "Any":
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        return default
+
+    def pop(self, key: str, *args: "Any") -> "Any":
+        return self._cache.pop(key, *args)
+
+    def items(self) -> "ItemsView":
+        return self._cache.items()
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def __bool__(self) -> bool:
+        return bool(self._cache)
+
+    def to_list(self, key: str) -> "List[float]":
+        """Retorna como lista Python (para compatibilidad)."""
+        val = self._cache.get(key)
+        if val is None:
+            return []
+        try:
+            import numpy as np
+            if isinstance(val, np.ndarray):
+                return val.tolist()
+        except ImportError:
+            pass
+        return list(val)
 
 
 def _calculate_temporal_decay(
@@ -134,7 +202,7 @@ class MemoryManager:
         self._mmr_enabled = mmr_enabled
         self._mmr_lambda = mmr_lambda
         self._min_score = min_score
-        self._embedding_cache: Dict[str, List[float]] = {}
+        self._embedding_cache: LRUEmbeddingCache = LRUEmbeddingCache(maxsize=2000)
         self._dirty = False
         self._last_sync_at: Optional[float] = None
         self._closed = False
@@ -878,13 +946,43 @@ class MemoryManager:
     async def _vector_search(
         self, query_embedding: List[float], limit: int
     ) -> List[Tuple[str, float]]:
-        """Búsqueda por similitud vectorial."""
-        results: List[Tuple[str, float]] = []
-        for doc_id, embedding in self._embedding_cache.items():
-            sim = cosine_similarity(query_embedding, embedding)
-            results.append((doc_id, sim))
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results[:limit]
+        """Búsqueda por similitud vectorial — batch numpy (10-50x más rápido)."""
+        if not self._embedding_cache:
+            return []
+        try:
+            import numpy as np
+            doc_ids = list(self._embedding_cache._cache.keys())
+            embeddings_list = list(self._embedding_cache._cache.values())
+            # Construye matriz de embeddings: (N, D) float32
+            matrix = np.stack(
+                [e if isinstance(e, np.ndarray) else np.asarray(e, dtype=np.float32)
+                 for e in embeddings_list]
+            )  # shape: (N, D)
+            query_vec = np.asarray(query_embedding, dtype=np.float32)
+            query_norm = float(np.linalg.norm(query_vec))
+            if query_norm == 0.0:
+                return []
+            # Similitudes coseno vectorizadas: (N,)
+            dots = matrix @ query_vec
+            norms = np.linalg.norm(matrix, axis=1)
+            similarities = dots / (norms * query_norm + 1e-8)
+            # Top-k eficiente
+            n = len(similarities)
+            k = min(limit, n)
+            if k < n:
+                top_indices = np.argpartition(similarities, -k)[-k:]
+                top_indices = top_indices[np.argsort(similarities[top_indices])[::-1]]
+            else:
+                top_indices = np.argsort(similarities)[::-1]
+            return [(doc_ids[i], float(similarities[i])) for i in top_indices]
+        except (ImportError, ValueError):
+            # Fallback a Python puro si numpy falla
+            results: List[Tuple[str, float]] = []
+            for doc_id, embedding in self._embedding_cache.items():
+                sim = cosine_similarity(query_embedding, list(embedding) if hasattr(embedding, 'tolist') else embedding)
+                results.append((doc_id, sim))
+            results.sort(key=lambda x: x[1], reverse=True)
+            return results[:limit]
 
     def _apply_temporal_decay(
         self, results: List[Tuple[str, float]]

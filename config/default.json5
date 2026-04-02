@@ -39,6 +39,24 @@
     //   "enabled": true,
     //   "plugin": "somer.channels.discord",
     //   "config": { "token_env": "DISCORD_BOT_TOKEN" }
+    // },
+    // "whatsapp": {
+    //   "enabled": true,
+    //   "plugin": "somer.channels.whatsapp",
+    //   "config": {
+    //     // Variables de entorno de credenciales (ver ~/.somer/.env)
+    //     "token_env": "WHATSAPP_TOKEN",
+    //     "phone_number_id_env": "WHATSAPP_PHONE_NUMBER_ID",
+    //     "verify_token_env": "WHATSAPP_VERIFY_TOKEN",
+    //     // Servidor de webhook — exponer este puerto a internet vía ngrok o reverse proxy
+    //     "webhook_port": 8099,
+    //     "webhook_host": "0.0.0.0",
+    //     "webhook_path": "/webhook/whatsapp",
+    //     // Marcar mensajes como leídos automáticamente
+    //     "auto_read": true,
+    //     // Idioma por defecto para templates de notificación
+    //     "default_language": "es"
+    //   }
     // }
   },
 

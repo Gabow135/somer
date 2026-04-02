@@ -1,24 +1,45 @@
 #!/bin/bash
+# briefing.sh — Generador de briefing diario SOMER
+# Fix OOM: ulimit -v 2097152 previene que procesos hijos (claude CLI) mapeen 22GB+ virtual
 cd /var/www/somer
 
-# Cargar variables de entorno
+# ── Protección anti-OOM ──────────────────────────────────────────────
+# Virtual memory cap: 2GB — suficiente para Python/SOMER, previene claude CLI (22GB)
+ulimit -v 2097152
+# Timeout: 5 minutos máximo — si se cuelga, muere limpio
+TIMEOUT=300
+
+# ── Variables de entorno ─────────────────────────────────────────────
 if [ -f ~/.somer/.env ]; then
+    set -a
     source ~/.somer/.env
+    set +a
 fi
 
-# Ejecutar briefing y capturar output
-OUTPUT=$(/var/www/somer/venv/bin/python3 entry.py agent run "dame el briefing de hoy dia" 2>&1)
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+echo "[$TIMESTAMP] Iniciando briefing..."
 
-# Extraer solo el briefing (últimas líneas después de "Procesando:")
-BRIEFING=$(echo "$OUTPUT" | sed -n '/Procesando:/,/^$/p' | tail -n +2)
+# ── Ejecutar briefing ────────────────────────────────────────────────
+OUTPUT=$(timeout $TIMEOUT /var/www/somer/venv/bin/python3 entry.py agent run \
+    "dame el briefing de hoy" 2>&1)
 
-# Si hay briefing, enviar a Telegram
-if [ -n "$BRIEFING" ]; then
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=881607309" \
-        -d "text=$(echo -e "📊 BRIEFING DIARIO\\n\\n$BRIEFING")" \
-        -d "parse_mode=HTML"
-    echo "Briefing enviado a Telegram"
+EXIT_CODE=$?
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+if [ $EXIT_CODE -eq 124 ]; then
+    echo "[$TIMESTAMP] ERROR: Briefing timeout (>5 min) — proceso terminado"
+    exit 1
+elif [ $EXIT_CODE -ne 0 ]; then
+    echo "[$TIMESTAMP] ERROR: Briefing falló (exit $EXIT_CODE)"
+    echo "$OUTPUT"
+    exit 1
+fi
+
+# ── Enviar a WhatsApp ────────────────────────────────────────────────
+if [ -n "$OUTPUT" ]; then
+    /var/www/somer/venv/bin/python3 /var/www/somer/notify_wa.py \
+        593995466833 "$(echo -e "$OUTPUT")" 2>&1
+    echo "[$TIMESTAMP] Briefing enviado a WhatsApp"
 else
-    echo "No se generó briefing"
+    echo "[$TIMESTAMP] WARN: Briefing vacío — no se envió"
 fi

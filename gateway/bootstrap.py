@@ -70,6 +70,7 @@ class GatewayBootstrap:
         self._message_bus: Any = None  # AgentMessageBus, lazy
         self._planning_engine: Any = None  # PlanningEngine, lazy
         self._alert_manager: Any = None  # ProactiveAlertManager, lazy
+        self._task_manager: Any = None  # AsyncTaskManager, lazy
 
         # Debounce: agrupa mensajes rápidos del mismo usuario
         self._debounce_buffers: Dict[str, List[IncomingMessage]] = {}
@@ -140,9 +141,14 @@ class GatewayBootstrap:
         # 14. Proactive alerts
         await self._setup_proactive_alerts()
 
+        # 15. Task queue
+        await self._setup_task_queue()
+
     async def stop(self) -> None:
         """Detiene todo."""
         console.print("[yellow]Deteniendo servicios...[/yellow]")
+        if self._task_manager:
+            await self._task_manager.stop()
         if self._alert_manager:
             await self._alert_manager.stop()
         if self._heartbeat:
@@ -402,6 +408,9 @@ class GatewayBootstrap:
             elif channel_id == "webchat":
                 from channels.webchat.plugin import WebChatPlugin
                 return WebChatPlugin()
+            elif channel_id == "whatsapp":
+                from channels.whatsapp.plugin import WhatsAppPlugin
+                return WhatsAppPlugin()
             else:
                 logger.warning("Canal no soportado para gateway: %s", channel_id)
                 return None
@@ -597,6 +606,58 @@ class GatewayBootstrap:
             f"  [green]✓[/green] Proactive alerts "
             f"({len(self._config.proactive_alerts.rules)} reglas)"
         )
+
+    # ── Task Queue ─────────────────────────────────────────────────
+
+    async def _setup_task_queue(self) -> None:
+        """Inicializa el task queue con workers y handlers built-in."""
+        try:
+            from tasks.manager import AsyncTaskManager
+            from tasks.handlers import TaskHandlers
+            from tasks.tools import register_task_tools
+
+            self._task_manager = AsyncTaskManager("redis://localhost:6379")
+
+            # Registrar handlers built-in
+            if self._runner:
+                tool_reg = getattr(self._runner, "_tool_registry", None)
+                handlers = TaskHandlers(self._runner, tool_reg)
+                self._task_manager.register_handler("agent_run", handlers.handle_agent_run)
+                self._task_manager.register_handler("tool_call", handlers.handle_tool_call)
+                self._task_manager.register_handler("custom", handlers.handle_custom)
+
+                # Registrar tools en el registry del agente
+                if tool_reg:
+                    register_task_tools(tool_reg, self._task_manager)
+
+            # Callback de finalización: notificar al usuario por su canal
+            async def _on_task_complete(task: Any, result: str = None, error: str = None) -> None:
+                channel_id = getattr(task, "channel", "")
+                user_id = getattr(task, "user_id", "")
+                if not channel_id or not user_id:
+                    return
+                plugin = self._channel_registry.get(channel_id)
+                if not plugin:
+                    return
+                title = getattr(task, "title", "Tarea")
+                if error:
+                    msg = "Task '{}' failed: {}".format(title, error)
+                else:
+                    # Truncate long results
+                    display = result if result and len(result) < 500 else (result[:497] + "..." if result else "No result")
+                    msg = "Task '{}' completed:\n{}".format(title, display)
+                try:
+                    await plugin.send_message(user_id, msg)
+                except Exception as exc:
+                    logger.warning("Error notificando tarea completada: %s", exc)
+
+            self._task_manager.set_completion_callback(_on_task_complete)
+
+            # Arrancar workers (2 por defecto)
+            await self._task_manager.start(num_workers=2)
+            console.print("  [green]\u2713[/green] Task queue (2 workers)")
+        except Exception as exc:
+            logger.warning("Task queue no disponible: %s", exc)
 
     # ── Credential Interceptor ─────────────────────────────────────
 

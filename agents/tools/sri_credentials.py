@@ -106,6 +106,12 @@ def _get_db() -> sqlite3.Connection:
         conn.commit()
     except Exception:
         pass  # Ya existe la columna, ignorar silenciosamente
+    # Migration automática: agregar columna whatsapp_number si no existe
+    try:
+        conn.execute("ALTER TABLE sri_users ADD COLUMN whatsapp_number TEXT DEFAULT NULL")
+        conn.commit()
+    except Exception:
+        pass  # Ya existe la columna, ignorar silenciosamente
     return conn
 
 
@@ -118,6 +124,7 @@ def save_credentials(
     alias: Optional[str] = None,
     owner_user_id: Optional[str] = None,
     name: Optional[str] = None,
+    whatsapp_number: Optional[str] = None,
 ) -> dict:
     """Guarda (INSERT OR REPLACE) credenciales SRI.
 
@@ -127,9 +134,10 @@ def save_credentials(
         alias: Nombre amigable interno (ej: 'Empresa ABC').
         owner_user_id: ID del usuario propietario.
         name: Razón social o nombre completo del contribuyente (opcional).
+        whatsapp_number: Número WhatsApp en formato internacional sin + (ej: '593987654321').
 
     Returns:
-        dict con {success, ruc, alias, name, message}
+        dict con {success, ruc, alias, name, whatsapp_number, message}
     """
     if not ruc or len(ruc) != 13 or not ruc.isdigit():
         return {"success": False, "error": f"RUC inválido: debe tener 13 dígitos numéricos (recibido: '{ruc}')"}
@@ -137,21 +145,26 @@ def save_credentials(
     if not password:
         return {"success": False, "error": "Password no puede estar vacío"}
 
+    # Normalizar número WhatsApp: quitar +, espacios y guiones
+    if whatsapp_number:
+        whatsapp_number = whatsapp_number.strip().lstrip("+").replace(" ", "").replace("-", "")
+
     encrypted = encrypt_password(password)
     conn = _get_db()
     try:
         existing = conn.execute("SELECT id FROM sri_users WHERE ruc = ?", (ruc,)).fetchone()
         if existing:
             conn.execute(
-                "UPDATE sri_users SET password = ?, alias = ?, name = ?, owner_user_id = ?, updated_at = CURRENT_TIMESTAMP "
-                "WHERE ruc = ?",
-                (encrypted, alias, name, owner_user_id, ruc),
+                "UPDATE sri_users SET password = ?, alias = ?, name = ?, owner_user_id = ?, "
+                "whatsapp_number = ?, updated_at = CURRENT_TIMESTAMP WHERE ruc = ?",
+                (encrypted, alias, name, owner_user_id, whatsapp_number, ruc),
             )
             action = "updated"
         else:
             conn.execute(
-                "INSERT INTO sri_users (ruc, password, alias, name, owner_user_id) VALUES (?, ?, ?, ?, ?)",
-                (ruc, encrypted, alias, name, owner_user_id),
+                "INSERT INTO sri_users (ruc, password, alias, name, owner_user_id, whatsapp_number) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (ruc, encrypted, alias, name, owner_user_id, whatsapp_number),
             )
             action = "created"
         conn.commit()
@@ -161,6 +174,7 @@ def save_credentials(
             "ruc": ruc,
             "alias": alias or "",
             "name": name or "",
+            "whatsapp_number": whatsapp_number or "",
             "action": action,
             "message": f"Credenciales SRI {action} para RUC {ruc}" + (f" ({display})" if display else ""),
         }
@@ -206,12 +220,14 @@ def get_credentials(ruc_or_name: str, user_id: Optional[str] = None) -> Optional
                 ).fetchone()
         if not row:
             return None
+        row_keys = row.keys()
         return {
             "ruc": row["ruc"],
             "password": decrypt_password(row["password"]),
             "alias": row["alias"],
-            "name": row["name"] if "name" in row.keys() else None,
+            "name": row["name"] if "name" in row_keys else None,
             "owner_user_id": row["owner_user_id"],
+            "whatsapp_number": row["whatsapp_number"] if "whatsapp_number" in row_keys else None,
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
         }
@@ -227,21 +243,21 @@ def get_credentials_by_name(name: str, user_id: Optional[str] = None) -> list[di
         user_id: Si se proporciona, filtra por owner_user_id (opcional).
 
     Returns:
-        Lista de dicts {ruc, alias, name, owner_user_id} sin passwords descifrados.
+        Lista de dicts {ruc, alias, name, owner_user_id, whatsapp_number} sin passwords descifrados.
     """
     conn = _get_db()
     try:
         pattern = f"%{name}%"
         if user_id:
             rows = conn.execute(
-                "SELECT ruc, alias, name, owner_user_id, created_at, updated_at FROM sri_users "
+                "SELECT ruc, alias, name, owner_user_id, whatsapp_number, created_at, updated_at FROM sri_users "
                 "WHERE (LOWER(name) LIKE LOWER(?) OR LOWER(alias) LIKE LOWER(?)) AND owner_user_id = ? "
                 "ORDER BY ruc",
                 (pattern, pattern, user_id),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT ruc, alias, name, owner_user_id, created_at, updated_at FROM sri_users "
+                "SELECT ruc, alias, name, owner_user_id, whatsapp_number, created_at, updated_at FROM sri_users "
                 "WHERE LOWER(name) LIKE LOWER(?) OR LOWER(alias) LIKE LOWER(?) "
                 "ORDER BY ruc",
                 (pattern, pattern),
@@ -258,19 +274,19 @@ def list_all_credentials(user_id: Optional[str] = None) -> list[dict]:
         user_id: Si se proporciona, filtra por owner_user_id (opcional).
 
     Returns:
-        Lista de dicts {ruc, alias, name, owner_user_id, created_at, updated_at}
+        Lista de dicts {ruc, alias, name, owner_user_id, whatsapp_number, created_at, updated_at}
     """
     conn = _get_db()
     try:
         if user_id:
             rows = conn.execute(
-                "SELECT ruc, alias, name, owner_user_id, created_at, updated_at FROM sri_users "
+                "SELECT ruc, alias, name, owner_user_id, whatsapp_number, created_at, updated_at FROM sri_users "
                 "WHERE owner_user_id = ? ORDER BY ruc",
                 (user_id,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT ruc, alias, name, owner_user_id, created_at, updated_at FROM sri_users ORDER BY ruc"
+                "SELECT ruc, alias, name, owner_user_id, whatsapp_number, created_at, updated_at FROM sri_users ORDER BY ruc"
             ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -284,5 +300,47 @@ def delete_credentials(ruc: str) -> bool:
         cursor = conn.execute("DELETE FROM sri_users WHERE ruc = ?", (ruc,))
         conn.commit()
         return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def set_whatsapp_number(ruc: str, whatsapp_number: str) -> dict:
+    """Actualiza el número de WhatsApp para un RUC específico.
+
+    Args:
+        ruc: RUC del contribuyente (13 dígitos).
+        whatsapp_number: Número WhatsApp en formato internacional.
+            Se normaliza automáticamente (quita +, espacios, guiones).
+            Ejemplo: '+593 99 546-6833' → '593995466833'.
+
+    Returns:
+        dict con {success, ruc, whatsapp_number, message} o {success, error}.
+    """
+    if not ruc or len(ruc) != 13 or not ruc.isdigit():
+        return {"success": False, "error": f"RUC inválido: debe tener 13 dígitos numéricos (recibido: '{ruc}')"}
+
+    if not whatsapp_number:
+        return {"success": False, "error": "whatsapp_number no puede estar vacío"}
+
+    # Normalizar: quitar +, espacios y guiones
+    numero_normalizado = whatsapp_number.strip().lstrip("+").replace(" ", "").replace("-", "")
+
+    conn = _get_db()
+    try:
+        existing = conn.execute("SELECT id FROM sri_users WHERE ruc = ?", (ruc,)).fetchone()
+        if not existing:
+            return {"success": False, "error": f"RUC {ruc} no encontrado en la base de datos"}
+
+        conn.execute(
+            "UPDATE sri_users SET whatsapp_number = ?, updated_at = CURRENT_TIMESTAMP WHERE ruc = ?",
+            (numero_normalizado, ruc),
+        )
+        conn.commit()
+        return {
+            "success": True,
+            "ruc": ruc,
+            "whatsapp_number": numero_normalizado,
+            "message": f"Número WhatsApp actualizado para RUC {ruc}: {numero_normalizado}",
+        }
     finally:
         conn.close()

@@ -118,10 +118,13 @@ class SQLiteMemoryBackend:
         """)
         self._conn.commit()
 
-        # Intentar cargar sqlite-vec
+        # Intentar cargar sqlite-vec para ANN vector search
         try:
+            import sqlite_vec
             self._conn.enable_load_extension(True)
-            self._has_vec = False
+            sqlite_vec.load(self._conn)
+            self._conn.enable_load_extension(False)
+            self._has_vec = True
         except Exception:
             self._has_vec = False
 
