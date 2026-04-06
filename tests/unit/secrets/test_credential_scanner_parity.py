@@ -44,8 +44,8 @@ SAMPLE_CREDENTIALS = {
     "github_pat": "ghp_abcdefghij1234567890abcdefghij123456",
     "github_oauth": "gho_abcdefghij1234567890abcdefghij123456",
     "gitlab": "glpat-abcdefghijklmnopqrstuvwx",
-    "slack_bot": "xoxb-FILTERED",
-    "slack_app": "xapp-FILTERED",
+    "slack_bot": "xoxb-FAKE-TOKEN-FOR-TESTS",
+    "slack_app": "xapp-FAKE-TOKEN-FOR-TESTS",
     "tavily": "tvly-abcdefghijklmnopqrstuvwx",
     "openai": "sk-proj-abcdefghij1234567890abcd",
 }
