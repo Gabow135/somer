@@ -1,12 +1,10 @@
 #!/bin/bash
 # briefing.sh — Generador de briefing diario SOMER
-# Fix OOM: ulimit -v 2097152 previene que procesos hijos (claude CLI) mapeen 22GB+ virtual
+# Envía a WhatsApp + Telegram
 cd /var/www/somer
 
 # ── Protección anti-OOM ──────────────────────────────────────────────
-# Virtual memory cap: 2GB — suficiente para Python/SOMER, previene claude CLI (22GB)
 ulimit -v 2097152
-# Timeout: 5 minutos máximo — si se cuelga, muere limpio
 TIMEOUT=300
 
 # ── Variables de entorno ─────────────────────────────────────────────
@@ -35,11 +33,17 @@ elif [ $EXIT_CODE -ne 0 ]; then
     exit 1
 fi
 
-# ── Enviar a WhatsApp ────────────────────────────────────────────────
+# ── Enviar ───────────────────────────────────────────────────────────
 if [ -n "$OUTPUT" ]; then
+    # WhatsApp
     /var/www/somer/venv/bin/python3 /var/www/somer/notify_wa.py \
         593995466833 "$(echo -e "$OUTPUT")" 2>&1
     echo "[$TIMESTAMP] Briefing enviado a WhatsApp"
+
+    # Telegram
+    /var/www/somer/venv/bin/python3 /var/www/somer/notify_tg.py \
+        881607309 "$(echo -e "$OUTPUT")" 2>&1
+    echo "[$TIMESTAMP] Briefing enviado a Telegram"
 else
     echo "[$TIMESTAMP] WARN: Briefing vacío — no se envió"
 fi

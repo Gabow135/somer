@@ -14,6 +14,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from secrets.patterns import CREDENTIAL_PATTERNS
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,169 +36,56 @@ class ServiceDefinition:
     unique_prefix: bool = True  # patrón es único (no necesita contexto)
 
 
-# Orden importa: patrones más específicos primero
-SERVICE_DEFINITIONS: List[ServiceDefinition] = [
-    ServiceDefinition(
-        service_id="notion",
-        display_name="Notion",
-        env_var="NOTION_API_KEY",
-        key_pattern=r"ntn_[A-Za-z0-9]{20,}",
-        verify_url="https://api.notion.com",
-        verify_type="notion",
-        context_clues=["notion"],
-    ),
-    ServiceDefinition(
-        service_id="anthropic",
-        display_name="Anthropic (Claude)",
-        env_var="ANTHROPIC_API_KEY",
-        key_pattern=r"sk-ant-[A-Za-z0-9\-_]{20,}",
-        verify_url="https://api.anthropic.com",
-        verify_type="anthropic",
-        context_clues=["anthropic", "claude"],
-    ),
-    ServiceDefinition(
-        service_id="openrouter",
-        display_name="OpenRouter",
-        env_var="OPENROUTER_API_KEY",
-        key_pattern=r"sk-or-v1-[A-Za-z0-9]{48,}",
-        verify_url="https://openrouter.ai/api",
-        verify_type="openai_compat",
-        context_clues=["openrouter"],
-    ),
-    ServiceDefinition(
-        service_id="groq",
-        display_name="Groq",
-        env_var="GROQ_API_KEY",
-        key_pattern=r"gsk_[A-Za-z0-9]{20,}",
-        verify_url="https://api.groq.com/openai",
-        verify_type="openai_compat",
-        context_clues=["groq"],
-    ),
-    ServiceDefinition(
-        service_id="huggingface",
-        display_name="HuggingFace",
-        env_var="HF_TOKEN",
-        key_pattern=r"hf_[A-Za-z0-9]{20,}",
-        verify_url="https://huggingface.co/api",
-        verify_type="bearer",
-        context_clues=["huggingface", "hugging face", "hf"],
-    ),
-    ServiceDefinition(
-        service_id="telegram",
-        display_name="Telegram Bot",
-        env_var="TELEGRAM_BOT_TOKEN",
-        key_pattern=r"\d{8,}:[A-Za-z0-9_\-]{35}",
-        verify_url="https://api.telegram.org",
-        verify_type="telegram",
-        context_clues=["telegram", "bot"],
-    ),
-    ServiceDefinition(
-        service_id="perplexity",
-        display_name="Perplexity",
-        env_var="PERPLEXITY_API_KEY",
-        key_pattern=r"pplx-[A-Za-z0-9]{48,}",
-        verify_url="https://api.perplexity.ai",
-        verify_type="openai_compat",
-        context_clues=["perplexity"],
-    ),
-    ServiceDefinition(
-        service_id="xai",
-        display_name="xAI (Grok)",
-        env_var="XAI_API_KEY",
-        key_pattern=r"xai-[A-Za-z0-9]{20,}",
-        verify_url="https://api.x.ai",
-        verify_type="openai_compat",
-        context_clues=["xai", "grok"],
-    ),
-    ServiceDefinition(
-        service_id="tavily",
-        display_name="Tavily",
-        env_var="TAVILY_API_KEY",
-        key_pattern=r"tvly-[A-Za-z0-9]{20,}",
-        verify_url="https://api.tavily.com",
-        verify_type="tavily",
-        context_clues=["tavily"],
-    ),
-    ServiceDefinition(
-        service_id="trello_key",
-        display_name="Trello (API Key)",
-        env_var="TRELLO_API_KEY",
-        key_pattern=r"[a-f0-9]{32}",
-        verify_url="https://api.trello.com",
-        verify_type="trello",
-        context_clues=["trello", "trello api key", "trello key"],
-        unique_prefix=False,
-    ),
-    ServiceDefinition(
-        service_id="trello_token",
-        display_name="Trello (Token)",
-        env_var="TRELLO_TOKEN",
-        key_pattern=r"ATTA[a-f0-9]{56,}|[a-f0-9]{64}",
-        verify_url="https://api.trello.com",
-        verify_type="trello",
-        context_clues=["trello token", "trello oauth"],
-        unique_prefix=False,
-    ),
-    ServiceDefinition(
-        service_id="github",
-        display_name="GitHub",
-        env_var="GITHUB_TOKEN",
-        key_pattern=r"ghp_[A-Za-z0-9]{36}",
-        verify_url="https://api.github.com",
-        verify_type="bearer",
-        context_clues=["github"],
-    ),
-    ServiceDefinition(
-        service_id="gitlab",
-        display_name="GitLab",
-        env_var="GITLAB_TOKEN",
-        key_pattern=r"glpat-[A-Za-z0-9_\-]{20,}",
-        verify_url="https://gitlab.com/api/v4",
-        verify_type="bearer",
-        context_clues=["gitlab"],
-    ),
-    # --- Patrones NO únicos (necesitan contexto) ---
-    ServiceDefinition(
-        service_id="deepseek",
-        display_name="DeepSeek",
-        env_var="DEEPSEEK_API_KEY",
-        key_pattern=r"sk-[a-f0-9]{30,}",
-        verify_url="https://api.deepseek.com",
-        verify_type="openai_compat",
-        context_clues=["deepseek"],
-        unique_prefix=False,
-    ),
-    ServiceDefinition(
-        service_id="mistral",
-        display_name="Mistral",
-        env_var="MISTRAL_API_KEY",
-        key_pattern=r"[A-Za-z0-9]{32}",
-        verify_url="https://api.mistral.ai",
-        verify_type="openai_compat",
-        context_clues=["mistral"],
-        unique_prefix=False,
-    ),
-    ServiceDefinition(
-        service_id="together",
-        display_name="Together AI",
-        env_var="TOGETHER_API_KEY",
-        key_pattern=r"[a-f0-9]{64}",
-        verify_url="https://api.together.xyz",
-        verify_type="openai_compat",
-        context_clues=["together"],
-        unique_prefix=False,
-    ),
-    # OpenAI va después de DeepSeek para que sk- hex puro se resuelva a DeepSeek con contexto
-    ServiceDefinition(
-        service_id="openai",
-        display_name="OpenAI",
-        env_var="OPENAI_API_KEY",
-        key_pattern=r"sk-(?!ant-)[A-Za-z0-9\-_]{20,}",
-        verify_url="https://api.openai.com",
-        verify_type="openai_compat",
-        context_clues=["openai", "gpt", "chatgpt"],
-    ),
-]
+# ── Metadata extra por servicio (verify, clues) ──────────────────
+# Solo lo que NO está en patterns.py
+
+_SERVICE_META: Dict[str, Dict[str, Any]] = {
+    "anthropic": {"display": "Anthropic (Claude)", "url": "https://api.anthropic.com", "type": "anthropic", "clues": ["anthropic", "claude"]},
+    "openrouter": {"display": "OpenRouter", "url": "https://openrouter.ai/api", "type": "openai_compat", "clues": ["openrouter"]},
+    "groq": {"display": "Groq", "url": "https://api.groq.com/openai", "type": "openai_compat", "clues": ["groq"]},
+    "google": {"display": "Google", "url": "https://generativelanguage.googleapis.com", "type": "bearer", "clues": ["google", "gemini"]},
+    "huggingface": {"display": "HuggingFace", "url": "https://huggingface.co/api", "type": "bearer", "clues": ["huggingface", "hugging face", "hf"]},
+    "xai": {"display": "xAI (Grok)", "url": "https://api.x.ai", "type": "openai_compat", "clues": ["xai", "grok"]},
+    "perplexity": {"display": "Perplexity", "url": "https://api.perplexity.ai", "type": "openai_compat", "clues": ["perplexity"]},
+    "nvidia": {"display": "NVIDIA", "url": "https://integrate.api.nvidia.com", "type": "bearer", "clues": ["nvidia"]},
+    "notion": {"display": "Notion", "url": "https://api.notion.com", "type": "notion", "clues": ["notion"]},
+    "github_pat": {"display": "GitHub", "url": "https://api.github.com", "type": "bearer", "clues": ["github"]},
+    "github_oauth": {"display": "GitHub", "url": "https://api.github.com", "type": "bearer", "clues": ["github"]},
+    "gitlab": {"display": "GitLab", "url": "https://gitlab.com/api/v4", "type": "bearer", "clues": ["gitlab"]},
+    "slack_bot": {"display": "Slack Bot", "url": "https://slack.com/api", "type": "bearer", "clues": ["slack"]},
+    "slack_app": {"display": "Slack App", "url": "https://slack.com/api", "type": "bearer", "clues": ["slack"]},
+    "tavily": {"display": "Tavily", "url": "https://api.tavily.com", "type": "tavily", "clues": ["tavily"]},
+    "telegram": {"display": "Telegram Bot", "url": "https://api.telegram.org", "type": "telegram", "clues": ["telegram", "bot"]},
+    "discord": {"display": "Discord Bot", "url": "https://discord.com/api", "type": "bearer", "clues": ["discord"]},
+    "openai": {"display": "OpenAI", "url": "https://api.openai.com", "type": "openai_compat", "clues": ["openai", "gpt", "chatgpt"]},
+    "deepseek": {"display": "DeepSeek", "url": "https://api.deepseek.com", "type": "openai_compat", "clues": ["deepseek"]},
+    "trello_key": {"display": "Trello (API Key)", "url": "https://api.trello.com", "type": "trello", "clues": ["trello", "trello api key", "trello key"]},
+    "trello_token": {"display": "Trello (Token)", "url": "https://api.trello.com", "type": "trello", "clues": ["trello token", "trello oauth"]},
+    "mistral": {"display": "Mistral", "url": "https://api.mistral.ai", "type": "openai_compat", "clues": ["mistral"]},
+    "together": {"display": "Together AI", "url": "https://api.together.xyz", "type": "openai_compat", "clues": ["together"]},
+}
+
+
+def _build_service_definitions() -> List[ServiceDefinition]:
+    """Construye SERVICE_DEFINITIONS desde patterns.py + metadata local."""
+    defs: List[ServiceDefinition] = []
+    for p in CREDENTIAL_PATTERNS:
+        meta = _SERVICE_META.get(p.service_id, {})
+        defs.append(ServiceDefinition(
+            service_id=p.service_id,
+            display_name=meta.get("display", p.service_id.title()),
+            env_var=p.env_var,
+            key_pattern=p.pattern,
+            verify_url=meta.get("url", ""),
+            verify_type=meta.get("type", "bearer"),
+            context_clues=meta.get("clues", []),
+            unique_prefix=p.unique_prefix,
+        ))
+    return defs
+
+
+# Orden importa: patrones más específicos primero (heredado de patterns.py)
+SERVICE_DEFINITIONS: List[ServiceDefinition] = _build_service_definitions()
 
 
 @dataclass

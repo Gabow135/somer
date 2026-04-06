@@ -20,12 +20,127 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from infra.env import mask_secret, save_env_var, list_env_vars
+from secrets.patterns import CREDENTIAL_PATTERNS, get_unique_patterns
 
 logger = logging.getLogger(__name__)
 
 
+# ── Rust backend (Aho-Corasick) ───────────────────────────
+# Intenta usar el scanner nativo; si no está disponible, usa regex Python.
+
+_RUST_AVAILABLE = False
+_RustCredentialScanner = None
+
+try:
+    from somer_hybrid import CredentialScanner as _RustCredentialScanner
+    _RUST_AVAILABLE = True
+    logger.debug("Credential scanner: using Rust/Aho-Corasick backend")
+except ImportError:
+    logger.debug("Credential scanner: Rust backend not available, using Python regex")
+
+
+# ── Prefijos literales para Aho-Corasick ──────────────────
+# Extraemos el prefijo literal de cada regex para alimentar el autómata.
+# Solo para patrones con unique_prefix=True.
+
+_PREFIX_MAP: Dict[str, str] = {
+    "anthropic": "sk-ant-",
+    "openrouter": "sk-or-",
+    "groq": "gsk_",
+    "google": "AIza",
+    "huggingface": "hf_",
+    "xai": "xai-",
+    "perplexity": "pplx-",
+    "nvidia": "nvapi-",
+    "notion_ntn": "ntn_",
+    "notion_secret": "secret_",
+    "github_pat": "ghp_",
+    "github_oauth": "gho_",
+    "gitlab": "glpat-",
+    "slack_bot": "xoxb-",
+    "slack_app": "xapp-",
+    "tavily": "tvly-",
+    "openai": "sk-",
+    "trello_token_atta": "ATTA",
+}
+
+# Telegram y Discord no have trivially extractable prefixes
+# (they start with digits or variable-length base64), so they are
+# handled via the Python regex fallback even in Rust mode.
+
+
+def _build_rust_scanner():
+    """Build the Rust CredentialScanner from patterns.py definitions."""
+    if not _RUST_AVAILABLE or _RustCredentialScanner is None:
+        return None
+
+    rust_patterns: Dict[str, Dict[str, str]] = {}
+    for p in get_unique_patterns():
+        sid = p.service_id
+
+        # Notion has two prefixes in one regex — split them
+        if sid == "notion":
+            rust_patterns["notion_ntn"] = {
+                "prefix": "ntn_",
+                "regex": r"ntn_[a-zA-Z0-9]{20,}",
+            }
+            rust_patterns["notion_secret"] = {
+                "prefix": "secret_",
+                "regex": r"secret_[a-zA-Z0-9]{20,}",
+            }
+            continue
+
+        prefix = _PREFIX_MAP.get(sid)
+        if prefix is None:
+            # No literal prefix extractable (telegram, discord) — skip for Rust
+            continue
+
+        # Rust regex crate doesn't support lookahead (?!...).
+        # For OpenAI, the negative lookahead is unnecessary because
+        # Aho-Corasick matches more specific prefixes (sk-ant-, sk-or-) first
+        # and we deduplicate. Use a simpler regex.
+        regex_str = p.pattern
+        if sid == "openai":
+            regex_str = r"sk-[a-zA-Z0-9_-]{20,}"
+
+        rust_patterns[sid] = {
+            "prefix": prefix,
+            "regex": regex_str,
+        }
+
+    # Also add ATTA prefix for trello_token (unique_prefix=False but has literal prefix)
+    for p in CREDENTIAL_PATTERNS:
+        if p.service_id == "trello_token":
+            rust_patterns["trello_token_atta"] = {
+                "prefix": "ATTA",
+                "regex": r"ATTA[a-f0-9]{56,}",
+            }
+            break
+
+    try:
+        return _RustCredentialScanner(rust_patterns)
+    except Exception as exc:
+        logger.warning("Failed to build Rust credential scanner: %s", exc)
+        return None
+
+
+_RUST_SCANNER = _build_rust_scanner()
+
+# Map Rust pattern names back to service_id for patterns.py lookup
+_RUST_NAME_TO_SERVICE: Dict[str, str] = {
+    "notion_ntn": "notion",
+    "notion_secret": "notion",
+    "trello_token_atta": "trello_token",
+}
+
+
+def _rust_name_to_service(rust_name: str) -> str:
+    """Convert a Rust pattern name back to the service_id from patterns.py."""
+    return _RUST_NAME_TO_SERVICE.get(rust_name, rust_name)
+
+
 # ── Patrones de detección ─────────────────────────────────
-# Cada entrada: (nombre_servicio, env_var, regex_patrón, descripción)
+# Importados desde secrets.patterns (fuente única de verdad)
 
 @dataclass
 class CredentialPattern:
@@ -37,63 +152,27 @@ class CredentialPattern:
     kind: str = "api_key"  # api_key, token, secret, id
 
 
-# Patrones por prefijo conocido de API keys
-_PREFIX_PATTERNS: List[CredentialPattern] = [
-    CredentialPattern("anthropic", "ANTHROPIC_API_KEY",
-                      re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"),
-                      "Anthropic API Key"),
-    CredentialPattern("openai", "OPENAI_API_KEY",
-                      re.compile(r"sk-(?!ant-|or-)[a-zA-Z0-9_-]{20,}"),
-                      "OpenAI API Key"),
-    CredentialPattern("openrouter", "OPENROUTER_API_KEY",
-                      re.compile(r"sk-or-[a-zA-Z0-9_-]{20,}"),
-                      "OpenRouter API Key"),
-    CredentialPattern("groq", "GROQ_API_KEY",
-                      re.compile(r"gsk_[a-zA-Z0-9]{20,}"),
-                      "Groq API Key"),
-    CredentialPattern("google", "GOOGLE_API_KEY",
-                      re.compile(r"AIza[a-zA-Z0-9_-]{30,}"),
-                      "Google API Key"),
-    CredentialPattern("huggingface", "HUGGINGFACE_API_KEY",
-                      re.compile(r"hf_[a-zA-Z0-9]{20,}"),
-                      "HuggingFace Token"),
-    CredentialPattern("xai", "XAI_API_KEY",
-                      re.compile(r"xai-[a-zA-Z0-9]{20,}"),
-                      "xAI API Key"),
-    CredentialPattern("perplexity", "PERPLEXITY_API_KEY",
-                      re.compile(r"pplx-[a-zA-Z0-9]{40,}"),
-                      "Perplexity API Key"),
-    CredentialPattern("nvidia", "NVIDIA_API_KEY",
-                      re.compile(r"nvapi-[a-zA-Z0-9_-]{20,}"),
-                      "NVIDIA API Key"),
-    CredentialPattern("notion", "NOTION_API_KEY",
-                      re.compile(r"secret_[a-zA-Z0-9]{40,}"),
-                      "Notion API Key", "token"),
-    CredentialPattern("github", "GITHUB_TOKEN",
-                      re.compile(r"ghp_[a-zA-Z0-9]{36,}"),
-                      "GitHub Personal Access Token", "token"),
-    CredentialPattern("github", "GITHUB_TOKEN",
-                      re.compile(r"gho_[a-zA-Z0-9]{36,}"),
-                      "GitHub OAuth Token", "token"),
-    CredentialPattern("gitlab", "GITLAB_TOKEN",
-                      re.compile(r"glpat-[a-zA-Z0-9_-]{20,}"),
-                      "GitLab Token", "token"),
-    CredentialPattern("slack", "SLACK_BOT_TOKEN",
-                      re.compile(r"xoxb-[0-9]+-[a-zA-Z0-9-]+"),
-                      "Slack Bot Token", "token"),
-    CredentialPattern("slack", "SLACK_APP_TOKEN",
-                      re.compile(r"xapp-[0-9]+-[a-zA-Z0-9-]+"),
-                      "Slack App Token", "token"),
-    CredentialPattern("discord", "DISCORD_TOKEN",
-                      re.compile(r"[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}"),
-                      "Discord Bot Token", "token"),
-    CredentialPattern("telegram", "TELEGRAM_BOT_TOKEN",
-                      re.compile(r"\d{8,13}:[A-Za-z0-9_-]{30,50}"),
-                      "Telegram Bot Token", "token"),
-    CredentialPattern("twilio", "TWILIO_AUTH_TOKEN",
-                      re.compile(r"(?<=TWILIO|twilio)[^a-f0-9]*([a-f0-9]{32})"),
-                      "Twilio Auth Token", "token"),
-]
+def _build_prefix_patterns() -> List[CredentialPattern]:
+    """Construye _PREFIX_PATTERNS desde la fuente unificada."""
+    patterns: List[CredentialPattern] = []
+    for p in get_unique_patterns():
+        patterns.append(CredentialPattern(
+            service=p.service_id,
+            env_var=p.env_var,
+            pattern=re.compile(p.pattern),
+            description=p.description,
+            kind=p.kind,
+        ))
+    return patterns
+
+
+# Patrones por prefijo conocido — generados desde secrets.patterns
+_PREFIX_PATTERNS: List[CredentialPattern] = _build_prefix_patterns()
+
+# Build a lookup from service_id to CredentialPattern for fast access
+_SERVICE_TO_PATTERN: Dict[str, CredentialPattern] = {
+    cp.service: cp for cp in _PREFIX_PATTERNS
+}
 
 # Patrones para detección por contexto: el usuario dice "mi X es Y"
 # Soporta español e inglés
@@ -255,24 +334,11 @@ class CredentialDetector:
         seen_vars: Dict[str, str] = {}  # env_var → value (evita duplicados)
 
         # Estrategia 1: Detección por prefijo conocido
-        for cp in _PREFIX_PATTERNS:
-            for match in cp.pattern.finditer(text):
-                value = match.group(0).strip()
-                if len(value) < 10:
-                    continue
-                if cp.env_var in seen_vars:
-                    continue
-                seen_vars[cp.env_var] = value
-                report.credentials.append(DetectedCredential(
-                    env_var=cp.env_var,
-                    value=value,
-                    service=cp.service,
-                    description=cp.description,
-                    kind=cp.kind,
-                    confidence="high",
-                    source="prefix",
-                    already_set=self._is_already_set(cp.env_var, value),
-                ))
+        # Use Rust/Aho-Corasick backend if available, then fallback to Python regex
+        # for patterns not covered by Rust (telegram, discord).
+        if _RUST_SCANNER is not None:
+            self._scan_prefix_rust(text, report, seen_vars)
+        self._scan_prefix_python(text, report, seen_vars)
 
         # Estrategia 2: Detección por contexto (keyword + valor)
         for env_var, keywords in _CONTEXT_KEYWORDS.items():
@@ -333,6 +399,65 @@ class CredentialDetector:
             ))
 
         return report
+
+    def _scan_prefix_rust(
+        self,
+        text: str,
+        report: DetectionReport,
+        seen_vars: Dict[str, str],
+    ) -> None:
+        """Prefix scan using Rust/Aho-Corasick backend."""
+        assert _RUST_SCANNER is not None
+        matches = _RUST_SCANNER.scan(text)
+        for m in matches:
+            service_id = _rust_name_to_service(m.pattern_name)
+            cp = _SERVICE_TO_PATTERN.get(service_id)
+            if cp is None:
+                continue
+            value = m.matched_text.strip()
+            if len(value) < 10:
+                continue
+            if cp.env_var in seen_vars:
+                continue
+            seen_vars[cp.env_var] = value
+            report.credentials.append(DetectedCredential(
+                env_var=cp.env_var,
+                value=value,
+                service=cp.service,
+                description=cp.description,
+                kind=cp.kind,
+                confidence="high",
+                source="prefix",
+                already_set=self._is_already_set(cp.env_var, value),
+            ))
+
+    def _scan_prefix_python(
+        self,
+        text: str,
+        report: DetectionReport,
+        seen_vars: Dict[str, str],
+    ) -> None:
+        """Prefix scan using Python regex (fallback or complement to Rust)."""
+        for cp in _PREFIX_PATTERNS:
+            if cp.env_var in seen_vars:
+                continue
+            for match in cp.pattern.finditer(text):
+                value = match.group(0).strip()
+                if len(value) < 10:
+                    continue
+                if cp.env_var in seen_vars:
+                    continue
+                seen_vars[cp.env_var] = value
+                report.credentials.append(DetectedCredential(
+                    env_var=cp.env_var,
+                    value=value,
+                    service=cp.service,
+                    description=cp.description,
+                    kind=cp.kind,
+                    confidence="high",
+                    source="prefix",
+                    already_set=self._is_already_set(cp.env_var, value),
+                ))
 
     def save_detected(
         self,

@@ -1,0 +1,21 @@
+{
+  "default_workspace": "cgarcia_m",
+  "default_credentials": "sukasa",
+  "credentials": {
+    "sukasa": {
+      "username": "greyes@sukasa.com",
+      "label": "Sukasa"
+    }
+  },
+  "repositories": [
+    {
+      "workspace": "cgarcia_m",
+      "repo_slug": "web-front-sukasa",
+      "label": "Web Front Sukasa",
+      "credentials_key": "sukasa",
+      "rules_override": {},
+      "notify_phones": ["593995466833"],
+      "active": true
+    }
+  ]
+}

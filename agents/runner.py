@@ -26,6 +26,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Set,
     Tuple,
 )
 
@@ -44,7 +45,9 @@ from agents.model_fallback import (
     is_context_overflow,
     run_with_model_fallback,
 )
+from agents.pre_action import PreActionValidator
 from agents.tools.registry import ToolRegistry
+from agents.tools.selector import select_tools
 from context_engine.base import ContextEngine
 from context_engine.default import DefaultContextEngine
 from providers.base import BaseProvider
@@ -131,6 +134,8 @@ class AgentRunner:
         timeout_secs: float = 300.0,
         tool_registry: Optional[ToolRegistry] = None,
         compaction_config: Optional[CompactionConfig] = None,
+        lessons_memory: Optional[Any] = None,
+        episodic_memory: Optional[Any] = None,
     ):
         self._providers = provider_registry
         self._context = context_engine or DefaultContextEngine()
@@ -141,6 +146,10 @@ class AgentRunner:
         self._guard = ContextWindowGuard()
         self._tool_registry = tool_registry or ToolRegistry()
         self._compaction_config = compaction_config or CompactionConfig()
+        self._pre_action = PreActionValidator(
+            lessons_memory=lessons_memory,
+            episodic_memory=episodic_memory,
+        )
         self._abort: Optional[AbortController] = None
         self._on_stream: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None
         self._on_tool_start: Optional[Callable[[ToolCall], Coroutine[Any, Any, None]]] = None
@@ -241,6 +250,12 @@ class AgentRunner:
         # Resetear loop detector
         self._tool_registry.reset_loop_detector()
 
+        # Smart tool selection based on user message
+        allowed_tools = select_tools(
+            user_message,
+            total_registered=len(self._tool_registry.tool_names),
+        )
+
         # Loop de ejecución (para tool calls)
         start = time.monotonic()
         compaction_count = 0
@@ -276,7 +291,8 @@ class AgentRunner:
             # Llamar al provider (con fallback si se configuró)
             try:
                 response = await self._call_provider_with_fallback(
-                    provider, model, messages, fallback_models
+                    provider, model, messages, fallback_models,
+                    allowed_tools=allowed_tools,
                 )
             except ProviderError as exc:
                 # Si es overflow de contexto, intentar compactar
@@ -369,6 +385,22 @@ class AgentRunner:
                 )
                 break
 
+            # Pre-action: consultar memoria antes de ejecutar
+            validation = await self._pre_action.validate(
+                tool_calls, user_message,
+            )
+            if validation.has_warnings():
+                warning_text = validation.format_for_context()
+                logger.info(
+                    "[AGENT] Pre-action warnings: %s", warning_text[:300],
+                )
+                # Inyectar advertencias como mensaje de sistema para que
+                # el LLM las vea en la siguiente iteracion
+                messages.append({
+                    "role": "system",
+                    "content": warning_text,
+                })
+
             # Ejecutar tool calls
             logger.info("[AGENT] Ejecutando %d tool calls...", len(tool_calls))
             tool_results = await self._execute_tool_calls(tool_calls)
@@ -409,13 +441,14 @@ class AgentRunner:
         model: str,
         messages: List[Dict[str, Any]],
         fallback_models: Optional[List[Tuple[str, str]]] = None,
+        allowed_tools: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
         """Llama al provider con fallback automático.
 
         Portado de OpenClaw: model-fallback.ts → runWithModelFallback
         integrado en el attempt loop.
         """
-        tool_defs = self._build_all_tool_definitions()
+        tool_defs = self._build_all_tool_definitions(allowed_names=allowed_tools)
 
         if fallback_models:
             candidates = build_fallback_candidates(
@@ -628,13 +661,22 @@ class AgentRunner:
 
     # ── Tool definitions ──────────────────────────────────────
 
-    def _build_all_tool_definitions(self) -> Optional[List[Dict[str, Any]]]:
-        """Construye definiciones de tools combinando registry + legacy."""
-        # Tools del registry
-        defs = self._tool_registry.to_provider_format()
+    def _build_all_tool_definitions(
+        self, allowed_names: Optional[Set[str]] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Construye definiciones de tools combinando registry + legacy.
+
+        Args:
+            allowed_names: If provided, only include tools with these names.
+                           If None, include all tools.
+        """
+        # Tools del registry (filtered by allowed_names)
+        defs = self._tool_registry.to_provider_format(allowed_names=allowed_names)
 
         # Legacy tools
         for name in self._tools:
+            if allowed_names and name not in allowed_names:
+                continue
             defs.append({
                 "type": "function",
                 "function": {

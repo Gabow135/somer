@@ -118,9 +118,10 @@ class TestServiceIntent:
         self.interceptor = CredentialInterceptor()
 
     def test_intent_notion(self) -> None:
-        result = self.interceptor._detect_intent("quiero usar notion")
-        assert result is not None
-        assert result.service_id == "notion"
+        with patch.dict(os.environ, {}, clear=True):
+            result = self.interceptor._detect_intent("quiero usar notion")
+            assert result is not None
+            assert result.service_id == "notion"
 
     def test_intent_openai(self) -> None:
         result = self.interceptor._detect_intent("configurar openai")
@@ -200,10 +201,11 @@ class TestIntercept:
 
     @pytest.mark.asyncio
     async def test_intent_without_key(self) -> None:
-        result = await self.interceptor.intercept("quiero usar notion")
-        assert result.intercepted is True
-        assert result.service_id == "notion"
-        assert "necesito tu API key" in result.response
+        with patch.dict(os.environ, {}, clear=True):
+            result = await self.interceptor.intercept("quiero usar notion")
+            assert result.intercepted is True
+            assert result.service_id == "notion"
+            assert "necesito tu API key" in result.response
 
     @pytest.mark.asyncio
     async def test_no_match(self) -> None:

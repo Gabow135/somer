@@ -38,6 +38,12 @@ from memory.hybrid import (
     mmr_rerank,
     mmr_rerank_text,
 )
+
+# Try to import native HNSW vector index (Rust via PyO3)
+try:
+    from memory.hybrid import VectorIndex, _HAS_VECTOR_INDEX
+except ImportError:
+    _HAS_VECTOR_INDEX = False
 from memory.sqlite_backend import SQLiteMemoryBackend, _content_hash
 from shared.constants import (
     MEMORY_ARCHIVE_AFTER_DAYS,
@@ -203,6 +209,8 @@ class MemoryManager:
         self._mmr_lambda = mmr_lambda
         self._min_score = min_score
         self._embedding_cache: LRUEmbeddingCache = LRUEmbeddingCache(maxsize=2000)
+        self._vector_index: "Any" = None  # VectorIndex (Rust HNSW) or None
+        self._vector_index_dim: int = 0   # Track dimension for lazy init
         self._dirty = False
         self._last_sync_at: Optional[float] = None
         self._closed = False
@@ -270,6 +278,7 @@ class MemoryManager:
         entry_id = self._backend.store(entry)
         self._bm25.add_document(entry_id, content)
         self._embedding_cache[entry_id] = embedding
+        self._add_to_vector_index(entry_id, embedding)
         self._dirty = True
         return entry_id
 
@@ -319,12 +328,14 @@ class MemoryManager:
             self._bm25.add_document(entry_id, content)
             new_embedding = await self._embeddings.embed_single(content)
             self._embedding_cache[entry_id] = new_embedding
+            self._add_to_vector_index(entry_id, new_embedding)
             self._dirty = True
         return result
 
     async def delete(self, entry_id: str) -> bool:
         """Elimina una entrada permanentemente."""
         self._bm25.remove_document(entry_id)
+        self._remove_from_vector_index(entry_id)
         self._embedding_cache.pop(entry_id, None)
         result = self._backend.delete(entry_id)
         if result:
@@ -341,6 +352,7 @@ class MemoryManager:
         result = self._backend.archive(entry_id)
         if result:
             self._bm25.remove_document(entry_id)
+            self._remove_from_vector_index(entry_id)
             self._embedding_cache.pop(entry_id, None)
             self._dirty = True
         return result
@@ -354,6 +366,7 @@ class MemoryManager:
                 self._bm25.add_document(entry_id, entry.content)
                 if entry.embedding:
                     self._embedding_cache[entry_id] = entry.embedding
+                    self._add_to_vector_index(entry_id, entry.embedding)
             self._dirty = True
         return result
 
@@ -433,8 +446,8 @@ class MemoryManager:
             doc_embeddings: List[Tuple[str, List[float], float]] = []
             for doc_id, score in vector_results:
                 emb = self._embedding_cache.get(doc_id)
-                if emb:
-                    doc_embeddings.append((doc_id, emb, score))
+                if emb is not None and (not hasattr(emb, '__len__') or len(emb) > 0):
+                    doc_embeddings.append((doc_id, list(emb) if hasattr(emb, 'tolist') else emb, score))
             if doc_embeddings:
                 mmr_results = mmr_rerank(
                     query_embedding, doc_embeddings,
@@ -591,18 +604,18 @@ class MemoryManager:
                 if entry_a.id in merged_ids:
                     continue
                 emb_a = self._embedding_cache.get(entry_a.id)
-                if not emb_a and entry_a.embedding:
+                if emb_a is None and entry_a.embedding is not None:
                     emb_a = entry_a.embedding
-                if not emb_a:
+                if emb_a is None:
                     continue
 
                 for entry_b in entries[i + 1:]:
                     if entry_b.id in merged_ids:
                         continue
                     emb_b = self._embedding_cache.get(entry_b.id)
-                    if not emb_b and entry_b.embedding:
+                    if emb_b is None and entry_b.embedding is not None:
                         emb_b = entry_b.embedding
-                    if not emb_b:
+                    if emb_b is None:
                         continue
 
                     sim = cosine_similarity(emb_a, emb_b)
@@ -889,18 +902,21 @@ class MemoryManager:
     # ── Reindexación ─────────────────────────────────────────────
 
     async def rebuild_index(self) -> int:
-        """Reconstruye los índices BM25 y de embeddings desde SQLite.
+        """Reconstruye los índices BM25, vector HNSW y embeddings desde SQLite.
 
         Portado de OpenClaw: runSafeReindex / runUnsafeReindex en
         manager-sync-ops.ts.
         """
         self._bm25 = BM25()
         self._embedding_cache.clear()
+        self._vector_index = None
+        self._vector_index_dim = 0
         entries = self._backend.search_recent(limit=100000, include_archived=False)
         for entry in entries:
             self._bm25.add_document(entry.id, entry.content)
             if entry.embedding:
                 self._embedding_cache[entry.id] = entry.embedding
+                self._add_to_vector_index(entry.id, entry.embedding)
         logger.info("Índice reconstruido: %d entries", len(entries))
         return len(entries)
 
@@ -943,12 +959,66 @@ class MemoryManager:
 
     # ── Métodos privados ─────────────────────────────────────────
 
+    def _add_to_vector_index(self, entry_id: str, embedding: "Any") -> None:
+        """Agrega un vector al índice HNSW nativo (si disponible)."""
+        if not _HAS_VECTOR_INDEX:
+            return
+        try:
+            # Convert embedding to list of floats
+            if hasattr(embedding, 'tolist'):
+                vec = embedding.tolist()
+            else:
+                vec = list(embedding)
+            if not vec:
+                return
+            # Convert to f32
+            vec_f32 = [float(v) for v in vec]
+            dim = len(vec_f32)
+            # Lazy init of VectorIndex on first embedding
+            if self._vector_index is None or self._vector_index_dim != dim:
+                self._vector_index = VectorIndex(dim=dim)
+                self._vector_index_dim = dim
+                # Re-add existing cached embeddings to new index
+                for eid, emb in self._embedding_cache.items():
+                    if eid == entry_id:
+                        continue
+                    if hasattr(emb, 'tolist'):
+                        ev = emb.tolist()
+                    else:
+                        ev = list(emb)
+                    if len(ev) == dim:
+                        self._vector_index.add_vector(eid, [float(v) for v in ev])
+            self._vector_index.add_vector(entry_id, vec_f32)
+        except Exception:
+            # Non-critical: fall back to numpy/brute-force search
+            logger.debug("No se pudo agregar al índice HNSW: %s", entry_id, exc_info=True)
+
+    def _remove_from_vector_index(self, entry_id: str) -> None:
+        """Elimina un vector del índice HNSW nativo (si disponible)."""
+        if self._vector_index is not None:
+            try:
+                self._vector_index.remove_vector(entry_id)
+            except Exception:
+                logger.debug("No se pudo eliminar del índice HNSW: %s", entry_id, exc_info=True)
+
     async def _vector_search(
         self, query_embedding: List[float], limit: int
     ) -> List[Tuple[str, float]]:
-        """Búsqueda por similitud vectorial — batch numpy (10-50x más rápido)."""
+        """Búsqueda por similitud vectorial — HNSW nativo > numpy batch > Python puro."""
         if not self._embedding_cache:
             return []
+
+        # Fase 2: Usar HNSW nativo de Rust (O(log n) vs O(n) brute-force)
+        if self._vector_index is not None and self._vector_index.count > 0:
+            try:
+                qvec = [float(v) for v in query_embedding]
+                if len(qvec) == self._vector_index_dim:
+                    results = self._vector_index.search(qvec, k=limit)
+                    return [(doc_id, float(sim)) for doc_id, sim in results]
+            except Exception:
+                logger.debug("HNSW search falló, fallback a numpy", exc_info=True)
+
+        # Fallback: numpy brute-force (Fase 1)
         try:
             import numpy as np
             doc_ids = list(self._embedding_cache._cache.keys())

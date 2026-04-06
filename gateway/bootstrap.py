@@ -26,6 +26,7 @@ from config.schema import SomerConfig
 from gateway.server import GatewayServer
 from providers.base import BaseProvider
 from providers.registry import ProviderRegistry
+from shared.errors import AgentTimeoutError
 from shared.types import IncomingMessage, OutgoingMessage, ResponseType
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,25 @@ class GatewayBootstrap:
         from sessions.persistence import SessionPersistence
         self._persistence = SessionPersistence()
         console.print("  [green]✓[/green] Persistencia de sesiones")
+
+        # 5b. Hook de sintesis de sesion
+        try:
+            from hooks.session_synthesis import on_session_end
+            from hooks.internal import register_internal_hook
+
+            async def _session_synthesis_adapter(event: Any) -> None:
+                """Adapta HookEvent → Dict para on_session_end."""
+                session_data = getattr(event, "context", {})
+                await on_session_end(session_data)
+
+            register_internal_hook(
+                "session:close",
+                _session_synthesis_adapter,
+                name="session_synthesis",
+            )
+            console.print("  [green]✓[/green] Hook de síntesis de sesión")
+        except Exception as exc:
+            logger.warning("Session synthesis hook no disponible: %s", exc)
 
         # 6. Agent runner
         self._setup_agent_runner()
@@ -340,11 +360,18 @@ class GatewayBootstrap:
         except Exception as exc:
             logger.warning("Self-improve tools no disponibles: %s", exc)
 
+        # Registrar lessons tools (lecciones aprendidas)
+        try:
+            from agents.tools.lessons_tools import register_lessons_tools
+            register_lessons_tools(tool_registry)
+        except Exception as exc:
+            logger.warning("Lessons tools no disponibles: %s", exc)
+
         self._runner = AgentRunner(
             provider_registry=self._provider_registry,
             default_model=self._config.default_model,
             tool_registry=tool_registry,
-            timeout_secs=0,  # Sin timeout — el agente trabaja hasta terminar
+            timeout_secs=180,  # 3 minutos máximo por request
         )
 
         # Cadena de fallback configurada
@@ -898,13 +925,38 @@ class GatewayBootstrap:
                 "[MSG] Ejecutando agente para %s/%s (run=%s): '%s'",
                 channel_id, chat_id, run_id, combined_content[:100],
             )
-            turn = await self._runner.run(
-                session_id=run_id,
-                user_message=combined_content,
-                system_prompt=system_prompt,
-                extra_context=history_context if history_context else None,
-                fallback_models=self._fallback_models,
+
+            # Indicador de procesamiento: si el agente tarda >15s,
+            # enviar mensaje "Procesando..." para que el usuario sepa que seguimos trabajando
+            async def _send_processing_indicator(delay: float = 15.0) -> None:
+                await asyncio.sleep(delay)
+                try:
+                    p = self._channel_registry.get(channel_id)
+                    if p:
+                        await p.send_message(
+                            chat_id, "\u23f3 Procesando tu solicitud...",
+                            reply_to_message_id=reply_to_msg_id,
+                        )
+                except Exception:
+                    pass
+
+            indicator_task = asyncio.create_task(
+                _send_processing_indicator(delay=15)
             )
+            try:
+                turn = await self._runner.run(
+                    session_id=run_id,
+                    user_message=combined_content,
+                    system_prompt=system_prompt,
+                    extra_context=history_context if history_context else None,
+                    fallback_models=self._fallback_models,
+                )
+            finally:
+                indicator_task.cancel()
+                try:
+                    await indicator_task
+                except asyncio.CancelledError:
+                    pass
             logger.info(
                 "[MSG] Turno completado (run=%s): %d mensajes, %d tokens",
                 run_id, len(turn.messages), turn.token_count,
@@ -979,6 +1031,22 @@ class GatewayBootstrap:
             else:
                 logger.error("Canal %s no encontrado para responder", channel_id)
 
+        except AgentTimeoutError:
+            logger.warning(
+                "Timeout procesando mensaje de %s/%s (msg_id=%s)",
+                channel_id, chat_id, reply_to_msg_id,
+            )
+            try:
+                plugin = self._channel_registry.get(channel_id)
+                if plugin:
+                    await plugin.send_message(
+                        chat_id,
+                        "Lo siento, la solicitud tardó demasiado y fue cancelada. "
+                        "Intenta simplificar tu consulta o dividirla en partes más pequeñas.",
+                        reply_to_message_id=reply_to_msg_id,
+                    )
+            except Exception:
+                pass
         except Exception as exc:
             logger.exception(
                 "Error procesando mensaje de %s/%s (msg_id=%s)",

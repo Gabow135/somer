@@ -52,6 +52,9 @@ memory = [
 security = [
     "dnspython>=2.4.0",
 ]
+native = [
+    "somer_hybrid>=0.1.0",
+]
 all = [
     "somer[providers]",
     "somer[channels]",

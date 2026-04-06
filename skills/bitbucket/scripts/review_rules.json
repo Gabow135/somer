@@ -1,0 +1,74 @@
+{
+  "rules": {
+    "max_files_changed": {
+      "enabled": true,
+      "severity": "critical",
+      "value": 20,
+      "message": "El PR modifica {actual} archivos (máximo permitido: {limit})."
+    },
+    "max_lines_added": {
+      "enabled": true,
+      "severity": "critical",
+      "value": 500,
+      "message": "El PR agrega {actual} líneas (máximo permitido: {limit}). Considere dividir en PRs más pequeños."
+    },
+    "forbidden_patterns": {
+      "enabled": true,
+      "severity": "critical",
+      "patterns": [
+        "console\\.log",
+        "debugger",
+        "TODO:",
+        "FIXME:",
+        "HACK:",
+        "password\\s*=\\s*['\"][^'\"]+['\"]",
+        "api_key\\s*=\\s*['\"][^'\"]+['\"]"
+      ],
+      "message": "Se encontró patrón prohibido '{pattern}' en el diff ({count} ocurrencias)."
+    },
+    "required_patterns": {
+      "enabled": false,
+      "severity": "warning",
+      "patterns": [],
+      "message": "Patrón requerido '{pattern}' no encontrado en el diff."
+    },
+    "forbidden_files": {
+      "enabled": true,
+      "severity": "critical",
+      "files": [
+        ".env",
+        ".env.local",
+        ".env.production"
+      ],
+      "message": "El archivo prohibido '{file}' fue modificado en este PR."
+    },
+    "branch_naming": {
+      "enabled": true,
+      "severity": "warning",
+      "pattern": "^(feature|fix|hotfix|release|chore|docs)/",
+      "message": "La rama '{branch}' no sigue la convención de nombres. Esperado: feature/, fix/, hotfix/, release/, chore/, docs/"
+    },
+    "title_format": {
+      "enabled": true,
+      "severity": "warning",
+      "pattern": "^(feat|fix|hotfix|chore|docs|refactor|test|style|perf|ci):",
+      "message": "El título '{title}' no sigue el formato requerido. Esperado: feat:, fix:, hotfix:, chore:, docs:, refactor:, test:, style:, perf:, ci:"
+    },
+    "require_description": {
+      "enabled": true,
+      "severity": "warning",
+      "message": "El PR no tiene descripción. Agregue una descripción que explique los cambios."
+    },
+    "max_commits": {
+      "enabled": true,
+      "severity": "warning",
+      "value": 10,
+      "message": "El PR tiene {actual} commits (máximo recomendado: {limit}). Considere hacer squash."
+    },
+    "require_reviewer": {
+      "enabled": true,
+      "severity": "warning",
+      "message": "El PR no tiene revisores asignados. Asigne al menos un revisor."
+    }
+  }
+}

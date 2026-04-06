@@ -258,7 +258,7 @@ def register_orchestrator_tools(registry: ToolRegistry) -> None:
         },
         handler=_full_pentest_handler,
         section=ToolSection.SECURITY,
-        timeout_secs=0,  # Sin timeout — el pipeline toma lo que necesite
+        timeout_secs=600,  # 10 minutos para pipelines de pentesting
     ))
 
     # ── Tools individuales por fase (para control granular) ──

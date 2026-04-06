@@ -471,7 +471,7 @@ def _build_runner() -> object:
         provider_registry=registry,
         default_model=config.default_model,
         tool_registry=tool_registry,
-        timeout_secs=0,  # Sin timeout — el agente trabaja hasta terminar
+        timeout_secs=180,  # 3 minutos máximo por request
     )
     return runner
 
@@ -732,30 +732,47 @@ async def _procesar_media(
 
                 audio_bytes = await client.download_media(media_id)
 
-                # Intentar transcribir con whisper
+                # Determinar extensión según MIME type
+                mime_type = raw.get("audio", {}).get("mime_type", "audio/ogg")
+                ext = ".ogg"
+                if "mp4" in mime_type or "m4a" in mime_type:
+                    ext = ".m4a"
+                elif "mpeg" in mime_type or "mp3" in mime_type:
+                    ext = ".mp3"
+                elif "wav" in mime_type:
+                    ext = ".wav"
+                elif "opus" in mime_type:
+                    ext = ".opus"
+
+                # Transcribir usando MediaPipeline (mismo pipeline que Telegram)
+                import tempfile
+                import os as _os
+                from pathlib import Path as _Path
+
+                tmp_fd, tmp_str = tempfile.mkstemp(suffix=ext, prefix="somer_wa_voice_")
+                tmp_path = _Path(tmp_str)
+                _os.close(tmp_fd)
+                tmp_path.write_bytes(audio_bytes)
+
                 try:
-                    import whisper
-                    import tempfile
-                    import os as _os
+                    from media.pipeline import MediaPipeline
 
-                    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-                        tmp.write(audio_bytes)
-                        tmp_path = tmp.name
+                    pipeline = MediaPipeline()
+                    media_file = pipeline.process(str(tmp_path))
+                    transcripcion = await pipeline.transcribe(media_file)
 
-                    try:
-                        model = whisper.load_model("base")
-                        resultado = model.transcribe(tmp_path, language="es")
-                        transcripcion = resultado.get("text", "").strip()
-                        if transcripcion:
-                            return f"[Audio transcrito: {transcripcion}]"
-                    finally:
-                        _os.unlink(tmp_path)
-                except ImportError:
-                    pass
+                    if transcripcion and not transcripcion.startswith("[Transcripci\u00f3n no disponible"):
+                        return f"[Audio transcrito: {transcripcion}]"
                 except Exception as exc_whisper:
                     logger.warning("Error transcribiendo audio: %s", exc_whisper)
+                finally:
+                    if tmp_path.exists():
+                        try:
+                            tmp_path.unlink()
+                        except Exception:
+                            pass
 
-                # Sin whisper: informar al agente
+                # Transcripción no disponible: informar al agente
                 return (
                     "[El usuario envió un audio. No se pudo transcribir automáticamente. "
                     "Informa al usuario que por el momento no puedo procesar mensajes de voz "

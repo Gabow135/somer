@@ -145,6 +145,7 @@ Thumbs.db
 
 # Rust
 target/
+somer_hybrid/target/
 Cargo.lock
 *.rlib
 

@@ -539,12 +539,20 @@ class ContextEngineRegistry:
         """Registra los engines core que vienen con SOMER."""
         # Importación diferida para evitar circular
         from context_engine.default import DefaultContextEngine
+        from context_engine.smart import SmartContextEngine
 
         self._engines[DEFAULT_ENGINE_ID] = EngineRegistration(
             engine_id=DEFAULT_ENGINE_ID,
             factory=DefaultContextEngine,
             owner=CORE_OWNER,
-            priority=0,
+            priority=100,
+        )
+
+        self._engines["smart"] = EngineRegistration(
+            engine_id="smart",
+            factory=SmartContextEngine,
+            owner=CORE_OWNER,
+            priority=10,
         )
 
     @staticmethod

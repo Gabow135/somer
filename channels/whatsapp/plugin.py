@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from channels.plugin import ChannelPlugin
@@ -88,6 +90,8 @@ class WhatsAppPlugin(ChannelPlugin):
         self._webhook_path: str = "/webhook/whatsapp"
         self._auto_read: bool = True
         self._default_language: str = "es"
+        self._dm_policy: Optional[str] = None
+        self._allow_from: Optional[List[str]] = None
 
     # ── Ciclo de vida ─────────────────────────────────────────
 
@@ -134,6 +138,21 @@ class WhatsAppPlugin(ChannelPlugin):
         # ── Opciones de comportamiento ────────────────────────
         self._auto_read = bool(config.get("auto_read", True))
         self._default_language = config.get("default_language", "es")
+
+        # ── Políticas de acceso DM ────────────────────────────
+        self._dm_policy = config.get("dm_policy")
+        raw_allow = config.get("allow_from")
+        if isinstance(raw_allow, str):
+            self._allow_from = [raw_allow]
+        elif isinstance(raw_allow, list):
+            self._allow_from = [str(x) for x in raw_allow]
+        else:
+            self._allow_from = None
+
+        policy_label = self._dm_policy or "open (default)"
+        logger.info(
+            "WhatsApp dm_policy: %s", policy_label,
+        )
 
         logger.info(
             "WhatsApp plugin configurado (phone_id: %s..., webhook: %s:%d%s)",
@@ -373,6 +392,55 @@ class WhatsAppPlugin(ChannelPlugin):
             )
             return False
 
+    # ── DM policy (mismo sistema que Telegram) ─────────────
+
+    def _check_dm_access(self, sender_id: str) -> str:
+        """Verifica acceso según dm_policy.
+
+        Returns:
+            "allow"   — dejar pasar
+            "pairing" — emitir código de pairing
+            "deny"    — rechazar silenciosamente
+        """
+        policy = self._dm_policy
+        if policy is None or policy == "open":
+            return "allow"
+        if policy == "disabled":
+            return "deny"
+
+        # Para "pairing" y "allowlist": verificar allowlist combinada
+        from channels.pairing import is_sender_allowed
+        if is_sender_allowed("whatsapp", sender_id, policy, self._allow_from):
+            return "allow"
+
+        # Si es pairing, emitir código; si es allowlist puro, denegar
+        if policy == "pairing":
+            return "pairing"
+        return "deny"
+
+    async def _send_pairing_challenge(self, sender_number: str) -> None:
+        """Genera y envía un código de pairing al usuario por WhatsApp."""
+        from channels.pairing import create_pairing_request
+
+        code = create_pairing_request("whatsapp", sender_number)
+        msg = (
+            f"Para usar este bot, necesitas un código de emparejamiento.\n\n"
+            f"Tu código: *{code}*\n\n"
+            f"Comparte este código con el administrador para que apruebe tu acceso.\n"
+            f"El administrador debe ejecutar:\n\n"
+            f"    somer pairing approve whatsapp {code}\n\n"
+            f"Una vez aprobado, podrás usar el bot normalmente."
+        )
+        if self._client:
+            try:
+                await self._client.send_text_message(to=sender_number, text=msg)
+            except Exception as exc:
+                logger.warning("Error enviando pairing challenge a %s: %s", sender_number, exc)
+
+    async def send_typing(self, target: str) -> None:
+        """WhatsApp no soporta typing indicators nativamente."""
+        pass
+
     # ── Mensajería entrante (procesamiento de webhook) ────────
 
     async def _procesar_payload(self, payload: Dict[str, Any]) -> None:
@@ -396,6 +464,21 @@ class WhatsAppPlugin(ChannelPlugin):
                 except Exception as exc:
                     logger.debug("No se pudo marcar como leído: %s", exc)
 
+            # ── Enforcement de dm_policy ──────────────────────
+            sender_number = m["from_number"]
+            access = self._check_dm_access(sender_number)
+            if access == "deny":
+                logger.info("WhatsApp: número no autorizado ignorado: %s", sender_number)
+                continue
+            if access == "pairing":
+                await self._send_pairing_challenge(sender_number)
+                continue
+
+            # ── Transcripción de audio/voz ────────────────────
+            if m["type"] == "audio":
+                await self._handle_audio_message(m)
+                continue
+
             # Construir el IncomingMessage normalizado
             incoming = IncomingMessage(
                 channel=ChannelType.WHATSAPP,
@@ -415,6 +498,133 @@ class WhatsAppPlugin(ChannelPlugin):
                 },
             )
             await self._dispatch_message(incoming)
+
+    # ── Transcripción de audio ───────────────────────────────
+
+    async def _handle_audio_message(self, m: Dict[str, Any]) -> None:
+        """Descarga y transcribe un mensaje de audio/voz usando MediaPipeline.
+
+        Sigue el mismo flujo que el plugin de Telegram:
+          1. Envía indicador "Transcribiendo audio..."
+          2. Descarga el audio desde la Graph API
+          3. Guarda en archivo temporal
+          4. Transcribe con MediaPipeline (OpenAI Whisper API o whisper CLI local)
+          5. Despacha IncomingMessage con la transcripción como contenido
+
+        Args:
+            m: Dict normalizado del mensaje (de parse_whatsapp_messages).
+        """
+        sender_number = m["from_number"]
+        raw = m["raw"]
+        media_id = raw.get("audio", {}).get("id", "")
+        mime_type = raw.get("audio", {}).get("mime_type", "audio/ogg")
+
+        if not media_id:
+            logger.warning("Audio sin media_id de %s", sender_number)
+            return
+
+        # Notificar al usuario que estamos transcribiendo
+        if self._client:
+            try:
+                await self._client.send_text_message(
+                    to=sender_number, text="Transcribiendo audio..."
+                )
+            except Exception:
+                pass
+
+        # Descargar el audio
+        tmp_path: Optional[Path] = None
+        try:
+            if not self._client:
+                logger.error("Cliente WhatsApp no disponible para descargar audio")
+                return
+
+            audio_bytes = await self._client.download_media(media_id)
+
+            # Determinar extensión según MIME type
+            ext = ".ogg"
+            if "mp4" in mime_type or "m4a" in mime_type:
+                ext = ".m4a"
+            elif "mpeg" in mime_type or "mp3" in mime_type:
+                ext = ".mp3"
+            elif "wav" in mime_type:
+                ext = ".wav"
+            elif "opus" in mime_type:
+                ext = ".opus"
+
+            tmp_fd, tmp_str = tempfile.mkstemp(suffix=ext, prefix="somer_wa_voice_")
+            tmp_path = Path(tmp_str)
+            os.close(tmp_fd)
+            tmp_path.write_bytes(audio_bytes)
+
+        except Exception as exc:
+            logger.error("Error descargando audio de WhatsApp: %s", exc)
+            if self._client:
+                try:
+                    await self._client.send_text_message(
+                        to=sender_number,
+                        text="No pude descargar el audio. Intenta de nuevo.",
+                    )
+                except Exception:
+                    pass
+            return
+
+        # Transcribir usando MediaPipeline (mismo que Telegram)
+        transcript = ""
+        try:
+            from media.pipeline import MediaPipeline
+
+            pipeline = MediaPipeline()
+            media_file = pipeline.process(str(tmp_path))
+            transcript = await pipeline.transcribe(media_file)
+        except Exception as exc:
+            logger.error("Error transcribiendo audio de WhatsApp: %s", exc, exc_info=True)
+            transcript = ""
+
+        # Limpiar archivo temporal
+        if tmp_path and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+        # Verificar resultado de la transcripción
+        if not transcript or transcript.startswith("[Transcripci\u00f3n no disponible"):
+            if self._client:
+                try:
+                    await self._client.send_text_message(
+                        to=sender_number,
+                        text=(
+                            "No pude transcribir el audio. Aseg\u00farate de que "
+                            "OPENAI_API_KEY est\u00e9 configurada o whisper instalado."
+                        ),
+                    )
+                except Exception:
+                    pass
+            return
+
+        # Despachar como mensaje de texto con metadata de audio
+        duration_secs = raw.get("audio", {}).get("duration", None)
+
+        incoming = IncomingMessage(
+            channel=ChannelType.WHATSAPP,
+            channel_user_id=sender_number,
+            channel_thread_id=None,
+            content=transcript,
+            metadata={
+                "message_id": m["message_id"],
+                "timestamp": m["timestamp"],
+                "type": m["type"],
+                "contact_name": m["contact_name"],
+                "phone_number_id": m["phone_number_id"],
+                "chat_id": sender_number,
+                "raw": raw,
+                "is_voice": True,
+                "original_transcript": transcript,
+                "duration_secs": duration_secs,
+            },
+        )
+        await self._dispatch_message(incoming)
 
     # ── Media ─────────────────────────────────────────────────
 
